@@ -13,7 +13,9 @@ import net.sf.json.JSONObject;
 import org.apache.commons.collections.map.HashedMap;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Controller;
+import org.springframework.validation.ValidationUtils;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
@@ -82,49 +84,30 @@ public class WechatController{
      */
     @RequestMapping(value = "/check_wx", method = {RequestMethod.POST})
     @ResponseBody
-    public void wxBackMsg(HttpServletRequest request) {
+    public String wxBackMsg(HttpServletRequest request) {
         try {
             Map wxParam = XMLConverUtil.parseXml(request);
+            log.info("微信回调信息：{}",JsonUtils.fromObject(wxParam));
             String openId = (String) wxParam.get("FromUserName");
             String[] phoneNumber = String.valueOf(wxParam.get("EventKey")).split("_");
-            String wx_token = (String) NRedisUtil.get(WXTOKEN);
-            switch (String.valueOf(wxParam.get("Event"))) {
-                // 公众号推送回调事件
-                case Constants.TEMPLATESENDJOBFINISH:
-                    if (Constants.STATUS_SUCCESS.equals(wxParam.get("Status"))) {
-                        break;
-                    }
-                    // 点击关注回调事件类型
-                case Constants.SUBSCRIBE:
-                    wechatService.sendTemplateMsg(openId, USER_SUBSCRIBE_WX);
-                    openId = openId + ":0";
-                    NRedisUtil.set(wx_token, openId, 300);
-                    break;
-                // 已关注 扫码回调事件类型
-                case Constants.SCAN:
-                    openId = openId + ":1";
-                    NRedisUtil.set(wx_token, openId, 300);
-                    break;
-                case Constants.CLICK:
-                    // 点击类型菜单回调   此处可做相关处理
-                    break;
-                case Constants.UNSUBSCRIBE:
-                    // 用户取关时间回调   此处可做相关记录
-                    break;
-                default:
-                    break;
+            if (phoneNumber.length == 11) {
+                Map param = new HashedMap();
+                param.put("openId", openId);
+                param.put("phoneNumber", phoneNumber[1]);
+//                if (userService.updateUserOpenIdByPhoneNumber(param) < 1) {
+                    log.error("用户绑定微信号失败：phoneNumber：{}", phoneNumber);
+                    return "";
+//                }
+//                return "";
             }
-            if (!EmptyUtils.isEmpty(wxParam.get("MsgType"))) {
-                String msgType = String.valueOf(wxParam.get("MsgType"));
-                log.info("{}", String.valueOf(wxParam.get("Content")));
-                if (Constants.TEXT.equals(msgType) && (String.valueOf(wxParam.get("Content")).contains("？") ||
-                        (String.valueOf(wxParam.get("Content")).contains("?")))) {
-                    wechatService.sendTemplateMsg(openId, USER_SUBSCRIBE_WX);
-                }
+            String wxReply = wechatService.dealDiffEvent(wxParam,openId);
+            if (!EmptyUtils.isEmpty(wxReply)) {
+                return wxReply;
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
+        return "";
     }
 
     /**
@@ -183,6 +166,19 @@ public class WechatController{
         // 此处可用request获取用户信息  拿到openid
         wechatService.sendTemplateMsg(new WxTempMsgTest("111","222","333"),"openId");
         return JsonUtils.fromObject("登陆成功");
+    }
+
+    /**
+     * 上传图片
+     */
+    @RequestMapping(value = "/upload_img", method = {RequestMethod.GET})
+    @ResponseBody
+    public JSONObject uploadImg() {
+        // 获取项目resources文件夹下的图片文件，文件名自行修改
+        ClassPathResource resource = new ClassPathResource("image.png");
+        String code = wechatService.uploadPermanentMaterial(resource, "image", "image", "image");
+        log.info("返回内容：{}", code);
+        return JsonUtils.fromObject(code);
     }
 
     /**

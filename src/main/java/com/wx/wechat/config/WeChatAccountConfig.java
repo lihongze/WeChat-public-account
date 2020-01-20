@@ -14,6 +14,13 @@ public class WeChatAccountConfig {
     @Value("${wechat.token}")
     private String WX_TOKEN;
 
+    @Value("${wechat.image}")
+    private String IMAGE_ID;
+
+    public String getIMAGE_ID() {
+        return IMAGE_ID;
+    }
+
     public String getWX_TOKEN() {
         return WX_TOKEN;
     }

@@ -2,13 +2,14 @@ package com.wx.wechat.service;
 
 import com.alibaba.fastjson.JSON;
 import com.alibaba.fastjson.JSONObject;
-import com.wx.wechat.Utils.EmptyUtils;
-import com.wx.wechat.Utils.HttpClientUtil;
-import com.wx.wechat.Utils.JsonUtils;
-import com.wx.wechat.Utils.NRedisUtil;
+import com.wx.wechat.Utils.*;
 import com.wx.wechat.config.WeChatAccountConfig;
+import com.wx.wechat.constant.Constants;
 import com.wx.wechat.constant.HttpStatusEnum;
 import com.wx.wechat.dao.Menu;
+import com.wx.wechat.dao.WxImage;
+import com.wx.wechat.dao.WxImageXml;
+import com.wx.wechat.dao.xml;
 import com.wx.wechat.temp.WxTempMsg;
 import lombok.extern.slf4j.Slf4j;
 import me.chanjar.weixin.common.error.WxErrorException;
@@ -16,12 +17,23 @@ import me.chanjar.weixin.mp.api.WxMpService;
 import me.chanjar.weixin.mp.bean.template.WxMpTemplateMessage;
 import org.apache.commons.collections.map.HashedMap;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
 
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Arrays;
+import java.util.Date;
 import java.util.HashMap;
 import java.util.Map;
+
+import static com.wx.wechat.constant.Constants.USER_SUBSCRIBE_WX;
+import static com.wx.wechat.constant.Constants.WXTOKEN;
 
 @Service
 @Slf4j
@@ -48,18 +60,26 @@ public class WechatService {
     // 删除微信公众号菜单接口
     public final static String DELETE_WX_MENU = "https://api.weixin.qq.com/cgi-bin/menu/delete?access_token=%s";
     public final static String SUBSCRIBE_URL = "https://api.weixin.qq.com/cgi-bin/message/custom/send?access_token=%s";
+    /** 微信上传文件接口 **/
+    public final static String UPLOAD_FILE = "https://api.weixin.qq.com/cgi-bin/material/add_material?access_token=%s&type=%s";
+
     private static final String OURWORK_WECHAT_TICKET = "OURWORK_WECHAT_TICKET";
     private static final long EXPIRES_IN_SECONDS = 7000;
+    private static long LAST_GETTOKEN_TIME;
 
     public net.sf.json.JSONObject getAccessTokenByCode(String code) {
         String getAccTokenUrl = String.format(GET_ACCTOKEN_BY_CODE, weChatAccountConfig.getAPP_ID(), weChatAccountConfig.getAPP_SECRET(), code);
         return JsonUtils.fromObject(HttpClientUtil.doGet(getAccTokenUrl));
     }
 
-    public String getAccessToken() {
+    /**
+     *  获取token的方法需加锁 防止并发获取 出现 redis中保存时效token的问题
+     *
+     */
+    public synchronized String getAccessToken() {
         String access_token = String.valueOf(NRedisUtil.get("wx_access_token"));
         log.info("accessTokenJson:{}", access_token);
-        if (!EmptyUtils.isEmpty(access_token) && !"null".equals(access_token)) {
+        if (!EmptyUtils.isEmpty(access_token) && !"null".equals(access_token) && System.currentTimeMillis() - LAST_GETTOKEN_TIME < 7000 * 1000) {
             return access_token;
         }
         Map<String, String> param = new HashMap<String, String>();
@@ -70,19 +90,24 @@ public class WechatService {
 
         log.info("accessTokenJson:{}", accessTokenJson);
         JSONObject accessTokenJsonObj = JSON.parseObject(accessTokenJson);
+        LAST_GETTOKEN_TIME = System.currentTimeMillis();
         NRedisUtil.set("wx_access_token", accessTokenJsonObj.getString("access_token"), 7100);
         return accessTokenJsonObj.getString("access_token");
     }
 
     public Boolean wxSignature(String timestamp, String nonce, String signature) {
-        String ourSignature = weChatAccountConfig.getWX_TOKEN() + timestamp + nonce;
+        String[] paramArr = new String[]{weChatAccountConfig.getWX_TOKEN(),timestamp,nonce};
+        Arrays.sort(paramArr);
+        //将排序后的结果拼成一个字符串
+        String content = paramArr[0].concat(paramArr[1]).concat(paramArr[2]);
         try {
-            byte[] digest = MessageDigest.getInstance("SHA-1").digest(ourSignature.getBytes());
-            ourSignature = byteToStr(digest);
+            byte[] digest = MessageDigest.getInstance("SHA-1").digest(content.getBytes());
+            content = byteToStr(digest);
+            log.info("our String:{},others:{}",content,signature);
         } catch (NoSuchAlgorithmException e) {
             e.printStackTrace();
         }
-        return ourSignature.equals(signature);
+        return content.equals(signature);
     }
 
 
@@ -180,6 +205,143 @@ public class WechatService {
         return result;
     }
 
+    /**
+     * 用户关注公众号自动回复
+     */
+    public String sendWxAutomaticAttentionMsg(String toUserName,String openId) {
+        log.info("自动回复：{}",toUserName);
+        xml xml = new xml();
+        xml.setContent(USER_SUBSCRIBE_WX);
+        xml.setCreateTime(DateUtil.formatDateNormal(new Date()));
+        xml.setFromUserName(toUserName);
+        xml.setMsgType("text");
+        xml.setToUserName(openId);
+        return XMLConverUtil.convertToXML(xml);
+    }
+
+    /**
+     * 用户发送带？消息，自动回复
+     */
+    public String sendWxAutomaticUserMsg(String toUserName,String openId) {
+        WxImageXml xml = new WxImageXml();
+        WxImage wxImage = new WxImage();
+        wxImage.setMediaId(weChatAccountConfig.getIMAGE_ID());
+        xml.setWxImage(wxImage);
+        xml.setCreateTime(DateUtil.formatDateNormal(new Date()));
+        xml.setFromUserName(toUserName);
+        xml.setMsgType("image");
+        xml.setToUserName(openId);
+        return XMLConverUtil.convertToXML(xml);
+    }
+
+    public String dealDiffEvent(Map wxParam, String openId) {
+        String wx_token = (String) NRedisUtil.get(WXTOKEN);
+        switch (String.valueOf(wxParam.get("Event"))) {
+            // 公众号推送回调事件
+            case Constants.TEMPLATESENDJOBFINISH:
+                if (Constants.STATUS_SUCCESS.equals(wxParam.get("Status"))) {
+                    break;
+                }
+                // 点击关注回调事件类型
+            case Constants.SUBSCRIBE:
+                String ret = sendWxAutomaticAttentionMsg(String.valueOf(wxParam.get("ToUserName")), openId);
+                openId = openId + ":0";
+                NRedisUtil.set(wx_token, openId, 300);
+                return ret;
+            // 已关注 扫码回调事件类型
+            case Constants.SCAN:
+                openId = openId + ":1";
+                NRedisUtil.set(wx_token, openId, 300);
+                break;
+            case Constants.CLICK:
+//                    messageService.sendWxTempMsg(new SendMsgSignupPwd("1","1","1","1"),227L,"123","2",null);
+                break;
+            case Constants.UNSUBSCRIBE:
+                break;
+            default:
+                break;
+        }
+        if (!EmptyUtils.isEmpty(wxParam.get("MsgType"))) {
+            String msgType = String.valueOf(wxParam.get("MsgType"));
+            log.info("公众号收到的用户消息：{}", String.valueOf(wxParam.get("Content")));
+            if (Constants.TEXT.equals(msgType) && (String.valueOf(wxParam.get("Content")).contains("？") ||
+                    (String.valueOf(wxParam.get("Content")).contains("?")))) {
+                return sendWxAutomaticUserMsg(String.valueOf(wxParam.get("ToUserName")), openId);
+            }
+        }
+        return "";
+    }
+
+    /**
+     * 上传永久素材
+     *
+     * @param file
+     * @param type
+     * @param title        type为video时需要,其他类型设null
+     * @param introduction type为video时需要,其他类型设null
+     * @return {"media_id":MEDIA_ID,"url":URL}
+     */
+    public String uploadPermanentMaterial(ClassPathResource file, String type, String title, String introduction) {
+
+        String url = String.format(UPLOAD_FILE, getAccessToken(), type);
+        String result = null;
+
+        try {
+            URL uploadURL = new URL(url);
+
+            HttpURLConnection conn = (HttpURLConnection) uploadURL.openConnection();
+            conn.setConnectTimeout(5000);
+            conn.setReadTimeout(30000);
+            conn.setDoOutput(true);
+            conn.setDoInput(true);
+            conn.setUseCaches(false);
+            conn.setRequestMethod("POST");
+            conn.setRequestProperty("Connection", "Keep-Alive");
+            conn.setRequestProperty("Cache-Control", "no-cache");
+            conn.setRequestProperty("Charset", "UTF-8");
+            String boundary = "-----------------------------" + System.currentTimeMillis();
+            conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
+
+            OutputStream output = conn.getOutputStream();
+            output.write(("--" + boundary + "\r\n").getBytes("utf-8"));
+            output.write(String.format("Content-Disposition: form-data; name=\"media\";filelength=\"%s\";filename=\"%s\"\r\n", file.contentLength(), "image.png").getBytes("utf-8"));
+            output.write("Content-Type: application/octet-stream\r\n\r\n".getBytes("utf-8"));
+
+            byte[] data = new byte[1024];
+            int len = 0;
+            InputStream inputStream = file.getInputStream();
+            while ((len = inputStream.read(data)) > -1) {
+                output.write(data, 0, len);
+            }
+
+            /*对类型为video的素材进行特殊处理*/
+            if ("video".equals(type)) {
+                output.write(("--" + boundary + "\r\n").getBytes());
+                output.write("Content-Disposition: form-data; name=\"description\";\r\n\r\n".getBytes());
+                output.write(String.format("{\"title\":\"%s\", \"introduction\":\"%s\"}", title, introduction).getBytes());
+            }
+
+            output.write(("\r\n--" + boundary + "--\r\n").getBytes("utf-8"));
+            output.flush();
+            output.close();
+            inputStream.close();
+
+            InputStream resp = conn.getInputStream();
+
+            StringBuffer sb = new StringBuffer();
+
+            while ((len = resp.read(data)) > -1) {
+                sb.append(new String(data, 0, len, "utf-8"));
+            }
+            resp.close();
+            result = sb.toString();
+        } catch (IOException e) {
+            //....
+            log.info("error:{}", e.getCause());
+        }
+
+        return result;
+    }
 
 }
 
