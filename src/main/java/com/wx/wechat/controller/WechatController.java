@@ -1,7 +1,6 @@
 package com.wx.wechat.controller;
 
 import com.wx.wechat.Utils.*;
-import com.wx.wechat.constant.Constants;
 import com.wx.wechat.dao.Button;
 import com.wx.wechat.dao.CommonButton;
 import com.wx.wechat.dao.ComplexButton;
@@ -15,7 +14,6 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Controller;
-import org.springframework.validation.ValidationUtils;
 import org.springframework.web.bind.annotation.*;
 
 import javax.annotation.Resource;
@@ -24,8 +22,6 @@ import java.io.UnsupportedEncodingException;
 import java.net.URLEncoder;
 import java.util.Map;
 
-import static com.wx.wechat.constant.Constants.USER_SUBSCRIBE_WX;
-import static com.wx.wechat.constant.Constants.WXTOKEN;
 import static com.wx.wechat.service.WechatService.*;
 
 @Slf4j
